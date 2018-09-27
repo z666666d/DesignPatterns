@@ -1,0 +1,356 @@
+JDK动态代理原理与源码
+
+1.newProxyInstance()方法的源码：
+ public static Object newProxyInstance(ClassLoader loader,  
+                                         Class<?>[] interfaces,  
+                                         InvocationHandler h)  
+        throws IllegalArgumentException{  
+        if (h == null) {  
+            throw new NullPointerException();  
+        }  
+        final Class<?>[] intfs = interfaces.clone();  
+        final SecurityManager sm = System.getSecurityManager();  
+        if (sm != null) {  
+            checkProxyAccess(Reflection.getCallerClass(), loader, intfs);  
+        }  
+        /*查找或生成指定的代理类*/  
+        Class<?> cl = getProxyClass0(loader, intfs);  
+        /*用指定的调用处理程序调用它的构造函数.*/  
+        try {  
+        //获得类的构造函数  
+            final Constructor<?> cons =cl.getConstructor(constructorParams);  
+            final InvocationHandler ih = h;  
+            if (sm != null && ProxyAccessHelper.needsNewInstanceCheck(cl)) {  
+              //当需要代理的类实现了一个非public的接口时，因为这样的接口需要特殊的权限，因此调用doPrivilege（native 修饰的方法）创建代理实例。  
+                return AccessController.doPrivileged(newPrivilegedAction<Object>() {  
+                    public Object run() {  
+                        return newInstance(cons,ih);  
+                    }  
+                });  
+            } else {  
+                return newInstance(cons,ih);  
+            }  
+        } catch (NoSuchMethodException e) {  
+            throw new InternalError(e.toString());  
+        }  
+} 
+
+可以看到，获得代理类的代码是
+Class<?>cl = getProxyClass0(loader,intfs);
+并由此获得代理类的构造函数，生成代理类的实例返回给该方法的调用者。
+
+2.继续跟进getProxyClass0()方法源码： 
+	/** 生成代理类。调用该方法前必须使用checkproxyaccess方法执行权限检查。*/  
+    private static Class<?> getProxyClass0(ClassLoader loader,  
+                                          Class<?>... interfaces) {  
+	    //检查实现的接口数，65535这个数字好特殊，端口数好像也是这个，这个数字是由虚拟机所决定的，2^16-1个  
+	    if (interfaces.length > 65535) {  
+	            throw new IllegalArgumentException("interface limit exceeded");  
+	        }  
+	    // 如果代理类已经通过实现给定接口的类加载器创建了，则返回缓存中的该类的副本；否则将通过ProxyClassFactory创建代理类  
+	    return proxyClassCache.get(loader, interfaces);  
+	} 
+	
+还是没有看到代理类是怎么生成的，只知道代理类是从proxyClassCache中取得的，这个变量是与缓存相关的一个对象
+
+3.查看该变量的声明与初始化：
+	private static final WeakCache<ClassLoader, Class<?>[], Class<?>>  
+	        proxyClassCache = new WeakCache<>(new KeyFactory(), new ProxyClassFactory()); 
+	可以发现proxyClassCache是个用来缓存代理类的类变量
+	类变量的特点是与类一一对应，在一个虚拟机中类只有一个，对应着在一个虚拟机中类变量也只有一个
+	且在此处，在Proxy类被加载的时候就赋值了。  
+	
+	在赋值操作的参数中有ProxyClassFactory()这么一个构造函数，这个是动态代理中的关键：生成代理类的类文件字节码。
+
+4.ProxyClassFactory工厂类源码
+/** 根据给定的类加载器和接口数组生成代理类的工厂类*/  
+private static final class ProxyClassFactory  
+    implements BiFunction<ClassLoader,Class<?>[], Class<?>>  
+{  
+    // 所有代理类名称的前缀  
+    private static final String proxyClassNamePrefix = "$Proxy";  
+  
+    //用于生成唯一代理类名称的下一个序号  
+    private static final AtomicLong nextUniqueNumber = new AtomicLong();  
+  
+    @Override  
+    public Class<?> apply(ClassLoader loader,Class<?>[] interfaces) {  
+  
+        Map<Class<?>, Boolean>interfaceSet = new IdentityHashMap<>(interfaces.length);  
+        for (Class<?> intf : interfaces) {  
+            /* 验证类加载器将此接口的名称解析为实际对象的名称。*/  
+            Class<?> interfaceClass =null;  
+            try {  
+                interfaceClass = Class.forName(intf.getName(),false, loader);  
+            } catch (ClassNotFoundException e) {  
+            }  
+            if (interfaceClass != intf) {  
+                throw new IllegalArgumentException(  
+                    intf + " is not visible from classloader");  
+            }  
+            /* 验证类对象确实是一个接口。*/  
+            if (!interfaceClass.isInterface()) {  
+                throw new IllegalArgumentException(  
+                   interfaceClass.getName() + " is not an interface");  
+            }  
+            /*确保接口唯一*/  
+            if (interfaceSet.put(interfaceClass, Boolean.TRUE) != null) {  
+                throw new IllegalArgumentException(  
+                    "repeated interface: " + interfaceClass.getName());  
+            }  
+        }  
+  
+        String proxyPkg = null;     // 代理类的包名  
+  
+        /*记录非公开代理接口的包，以便将代理类定义在同一个包中。确认所有非公共代理接口都在同一个包中。*/  
+        for (Class<?> intf : interfaces) {  
+            int flags = intf.getModifiers();  
+            if (!Modifier.isPublic(flags)) {  
+                String name =intf.getName();  
+                int n = name.lastIndexOf('.');  
+                String pkg = ((n == -1) ? "" : name.substring(0, n + 1));  
+                if (proxyPkg == null) {  
+                    proxyPkg = pkg;  
+                } else if (!pkg.equals(proxyPkg)) {  
+                    throw new IllegalArgumentException(  
+                        "non-public interfaces fromdifferent packages");  
+                }  
+            }  
+        }  
+  
+        if (proxyPkg == null) {  
+            // 如果没有非公开的代理接口，使用com.sun.proxy作为包名  
+            proxyPkg = ReflectUtil.PROXY_PACKAGE + ".";  
+        }  
+  
+        /* 生成代理类名的序号*/  
+        long num = nextUniqueNumber.getAndIncrement();  
+        //生成全类名  
+        String proxyName = proxyPkg + proxyClassNamePrefix + num;  
+  
+        /*生成代理类字节码 */  
+        byte[] proxyClassFile = ProxyGenerator.generateProxyClass(proxyName,interfaces);  
+        try {  
+            return defineClass0(loader, proxyName,proxyClassFile, 0, proxyClassFile.length);  
+        } catch (ClassFormatError e) {  
+            throw new IllegalArgumentException(e.toString());  
+        }  
+    }  
+    
+	可以看到产生代理类的具体逻辑，大致上是，根据传递的被代理类及其实现的接口生成代理类的字节码加载到缓存中
+	但是加载到缓存中只是一个.java文件也不能用，所以底层还有编译等操作。
+	
+	到这里，可以大致的看清JDK中动态代理的面孔了，实现的步骤为：
+	
+	1. 创建代理类的源码；
+
+	2. 对源码进行编译成字节码；
+
+	3. 将字节码加载到内存；
+
+	4. 实例化代理类对象并返回给调用者；
+	
+底层的代码我们看不到，但是我们可以查看其生成的字节码：
+	
+	
+1.	//获得字节码的测试方法  
+    byte[] classFile = ProxyGenerator.generateProxyClass("$Proxy1", Car.class.getInterfaces());   
+        FileOutputStream out = null;   
+        try {   
+            out = new FileOutputStream(System.getProperty("user.dir") + "\\$Proxy1.class");   
+            out.write(classFile);   
+            out.flush();   
+        } catch (Exception e) {   
+            e.printStackTrace();   
+        } finally {   
+            try {   
+                out.close();   
+            } catch (IOException e) {   
+                e.printStackTrace();   
+            }   
+        }  
+        
+        
+//生成的字节码：  
+importcn.com.goser.proxy.imooc.staticproxy.Moveable;  
+importjava.lang.reflect.InvocationHandler;  
+importjava.lang.reflect.Method;  
+importjava.lang.reflect.Proxy;  
+import java.lang.reflect.UndeclaredThrowableException;  
+   
+public final class $Proxy1 extends Proxy  
+  implements Moveable  
+{  
+  private static Method m1;  
+  private static Method m3;  
+  private static Method m0;  
+  private static Method m2;  
+   
+  public $Proxy1(InvocationHandler paramInvocationHandler)  
+    throws  
+  {  
+    super(paramInvocationHandler);  
+  }  
+   
+  public final boolean equals(Object paramObject)  
+    throws  
+  {  
+    try  
+    {  
+      return ((Boolean)this.h.invoke(this, m1, new Object[] { paramObject })).booleanValue();  
+    }  
+    catch (RuntimeException localRuntimeException)  
+    {  
+      throw localRuntimeException;  
+    }  
+    catch (Throwable localThrowable)  
+    {  
+    }  
+    throw new UndeclaredThrowableException(localThrowable);  
+  }  
+   
+  public final void move()  
+    throws Exception  
+  {  
+    try  
+    {  
+      this.h.invoke(this, m3, null);  
+      return;  
+    }  
+    catch (Exception localException)  
+    {  
+      throw localException;  
+    }  
+    catch (Throwable localThrowable)  
+    {  
+    }  
+    throw new UndeclaredThrowableException(localThrowable);  
+  }  
+   
+  public final int hashCode()  
+    throws  
+  {  
+    try  
+    {  
+      return ((Integer)this.h.invoke(this, m0, null)).intValue();  
+    }  
+    catch (RuntimeException localRuntimeException)  
+    {  
+      throw localRuntimeException;  
+    }  
+    catch (Throwable localThrowable)  
+    {  
+    }  
+    throw new UndeclaredThrowableException(localThrowable);  
+  }  
+   
+  public final String toString()  
+    throws  
+  {  
+    try  
+    {  
+      return (String)this.h.invoke(this, m2, null);  
+    }  
+    catch (RuntimeException localRuntimeException)  
+    {  
+      throw localRuntimeException;  
+    }  
+    catch (Throwable localThrowable)  
+    {  
+    }  
+    throw new UndeclaredThrowableException(localThrowable);  
+  }  
+   
+  static  
+  {  
+    try  
+    {  
+      m1 = Class.forName("java.lang.Object").getMethod("equals", new Class[] { Class.forName("java.lang.Object") });  
+      m3 = Class.forName("cn.com.goser.proxy.imooc.staticproxy.Moveable").getMethod("move", new Class[0]);  
+      m0 = Class.forName("java.lang.Object").getMethod("hashCode", new Class[0]);  
+      m2 = Class.forName("java.lang.Object").getMethod("toString", new Class[0]);  
+      return;  
+    }  
+    catch (NoSuchMethodExceptionlocalNoSuchMethodException)  
+    {  
+      throw new NoSuchMethodError(localNoSuchMethodException.getMessage());  
+    }  
+    catch (ClassNotFoundExceptionlocalClassNotFoundException)  
+    {  
+    }  
+    throw new NoClassDefFoundError(localClassNotFoundException.getMessage());  
+  }  
+}  
+
+
+生成的字节码比较长，但是在字节码中最关键的信息是代理类的声明：
+public final class $Proxy1 extends Proxy
+
+可以看到生成的代理类是继承了Proxy类的，这就是说明了为什么使用JDK动态代理不能实现继承式动态代理
+原因是Java不允许多继承，而生成的代理类本身就已经继承了Proxy类。
+
+至于最底层的native方法是怎么动态生成代理类的字节码我们也可以简单的模拟一下，先分析下模拟的步骤：
+
+首先要生成一段代理类的源码，然后将源码编译后生成代理类的实例返回给调用者。
+
+依据此步骤开始编写我们的模拟代码：
+/** 
+ * JDK java.lang.reflect.Proxy的模拟 
+ * @author Goser    (mailto:goskalrie@163.com) 
+ * @Since 2016年9月7日 
+ */  
+public class Proxy {  
+    private static final String  RT = "\r\n";  
+    public static Object newProxyInstance() throws Exception{  
+        //声明一段源码  
+        String sourceCode =  
+        "packagecn.com.goser.proxy.jdk.simulate;"+ RT +  
+        "importcn.com.goser.proxy.imooc.staticproxy.Admin;" + RT +  
+        "importcn.com.goser.proxy.imooc.staticproxy.Manager;" + RT +  
+        "//以聚合方式实现的代理主题" + RT +  
+        "public class $Proxy0 implementsManager{" + RT +  
+        "   privateAdmin admin;" + RT +  
+        "   public$Proxy0(Admin admin) {" + RT +  
+        "       super();" + RT +  
+        "       this.admin= admin;" + RT +  
+        "   }" + RT +  
+        "   publicvoid doSomething() {" + RT +  
+        "       System.out.println(\"Log:admin操作开始\");" + RT +  
+        "       admin.doSomething();" + RT +  
+        "       System.out.println(\"Log:admin操作结束\");" + RT +  
+        "   }" + RT +  
+        "}";  
+        String filename = System.getProperty("user.dir") + "/src/main/java/cn/com/goser/proxy/jdk/simulate/$Proxy0.java";  
+        File file = new File(filename);  
+        //使用org.apache.commons.io.FileUtils.writeStringToFile()将源码写入磁盘  
+        //编写到处，可以运行一下程序，可以在当前目录中看到生成的.java文件  
+        FileUtils.writeStringToFile(file,sourceCode);  
+        //获得当前系统中的编译器  
+        JavaCompiler complier = ToolProvider.getSystemJavaCompiler();  
+        //获得文件管理者  
+        StandardJavaFileManager fileMgr =complier.getStandardFileManager(null, null, null);  
+        Iterable its =fileMgr.getJavaFileObjects(filename);  
+        //编译任务  
+        CompilationTask task = complier.getTask(null, fileMgr, null, null, null, its);  
+        //开始编译，执行完可在当前目录下看到.class文件  
+        task.call();  
+        fileMgr.close();  
+        //load到内存  
+        ClassLoader loader = ClassLoader.getSystemClassLoader();  
+        Class cls = loader.loadClass("cn.com.goser.proxy.jdk.simulate.$Proxy0");  
+        //生成代理类对象  
+        Constructor ct = cls.getConstructor(Admin.class);  
+        return ct.newInstance(new Admin());  
+    }  
+}  
+class test{  
+    public static void main(String[] args) throws Exception {  
+        Manager m = (Manager)Proxy.newProxyInstance();  
+        m.doSomething();  
+    }  
+}  
+
+	
+	
+	
+	

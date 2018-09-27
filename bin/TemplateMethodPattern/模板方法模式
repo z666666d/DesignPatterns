@@ -1,0 +1,128 @@
+模板方法模式Template Method Pattern
+准备一个抽象类，将部分逻辑以具体方法以及具体构造函数的形式实现，然后声明一些抽象方法来迫使子类实现剩余的逻辑。
+不同的子类可以以不同的方式实现这些抽象方法，从而对剩余的逻辑有不同的实现。这就是模板方法模式的用意。
+
+模板方法模式是所有模式中最为常见的几个模式之一，是基于继承的代码复用的基本技术。
+代表这些具体逻辑步骤的方法称做基本方法(primitive method)；而将这些基本方法汇总起来的方法叫做模板方法(template method)
+模板方法所代表的行为称为顶级行为，其逻辑称为顶级逻辑。
+
+模板方法模式中的方法
+可以分为两类方法：模板方法和基本方法
+
+模板方法:
+模板方法是定义在抽象类中的，把基本操作方法组合在一起形成一个总算法或一个总行为的方法。
+抽象类可以有任意多个模板方法，而不限于一个。每一个模板方法都可以调用任意多个具体方法。
+
+基本方法可以分为三类
+抽象方法(Abstract Method)、具体方法(Concrete Method)和钩子方法(Hook Method)
+
+抽象方法：由抽象类声明，由具体子类实现。在Java语言里抽象方法以abstract关键字标示。只给出声明没有具体实现
+具体方法：由抽象类声明并实现，而子类并不实现或置换。
+钩子方法：抽象类声明并实现，而子类会加以扩展。通常抽象类给出的实现是一个空实现，作为方法的默认实现。
+
+默认钩子方法
+一个钩子方法常常由抽象类给出一个空实现作为此方法的默认实现。这种空的钩子方法叫做“Do Nothing Hook”。
+显然，这种默认钩子方法在缺省适配模式里面已经见过了，一个缺省适配模式讲的是一个类为一个接口提供一个默认的空实现，
+从而使得缺省适配类的子类不必像实现接口那样必须给出所有方法的实现，因为通常一个具体类并不需要所有的方法。
+
+命名规则
+钩子方法的名字应当以do开始，这是熟悉设计模式的Java开发人员的标准做法。
+在HttpServlet类中，也遵从这一命名规则，如doGet()、doPost()等方法。
+
+模板方法模式在Servlet中的应用
+使用过Servlet的人都清楚，除了要在web.xml做相应的配置外，还需继承一个叫HttpServlet的抽象类。
+HttpService类提供了一个service()方法，这个方法调用七个do方法中的一个或几个，完成对客户端调用的响应。
+这些do方法需要由HttpServlet的具体子类提供，因此这是典型的模板方法模式。
+
+service()方法的源代码：
+protected void service(HttpServletRequest req, HttpServletResponse resp)
+        throws ServletException, IOException {
+
+        String method = req.getMethod();
+
+        if (method.equals(METHOD_GET)) {
+            long lastModified = getLastModified(req);
+            if (lastModified == -1) {
+                // servlet doesn't support if-modified-since, no reason
+                // to go through further expensive logic
+                doGet(req, resp);
+            } else {
+                long ifModifiedSince = req.getDateHeader(HEADER_IFMODSINCE);
+                if (ifModifiedSince < (lastModified / 1000 * 1000)) {
+                    // If the servlet mod time is later, call doGet()
+                    // Round down to the nearest second for a proper compare
+                    // A ifModifiedSince of -1 will always be less
+                    maybeSetLastModified(resp, lastModified);
+                    doGet(req, resp);
+                } else {
+                    resp.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
+                }
+            }
+
+        } else if (method.equals(METHOD_HEAD)) {
+            long lastModified = getLastModified(req);
+            maybeSetLastModified(resp, lastModified);
+            doHead(req, resp);
+
+        } else if (method.equals(METHOD_POST)) {
+            doPost(req, resp);
+            
+        } else if (method.equals(METHOD_PUT)) {
+            doPut(req, resp);        
+            
+        } else if (method.equals(METHOD_DELETE)) {
+            doDelete(req, resp);
+            
+        } else if (method.equals(METHOD_OPTIONS)) {
+            doOptions(req,resp);
+            
+        } else if (method.equals(METHOD_TRACE)) {
+            doTrace(req,resp);
+            
+        } else {
+            //
+            // Note that this means NO servlet supports whatever
+            // method was requested, anywhere on this server.
+            //
+
+            String errMsg = lStrings.getString("http.method_not_implemented");
+            Object[] errArgs = new Object[1];
+            errArgs[0] = method;
+            errMsg = MessageFormat.format(errMsg, errArgs);
+            
+            resp.sendError(HttpServletResponse.SC_NOT_IMPLEMENTED, errMsg);
+        }
+    }
+    
+    
+这里的service()方法就是模板方法，do方法就是基本方法，全是钩子方法，具体方法角色可以选择需要的方法进行重写
+
+一个简单的例子，重写了doGet和doPost方法：
+public class TestServlet extends HttpServlet {
+
+    public void doGet(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+        
+        System.out.println("using the GET method");
+
+    }
+
+    public void doPost(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+            
+        System.out.println("using the POST method");
+    }
+
+}
+
+从上面的例子可以看出这是一个典型的模板方法模式。
+
+HttpServlet担任抽象模板角色
+
+　　　　模板方法：由service()方法担任。
+
+　　　　基本方法：由doPost()、doGet()等方法担任。
+
+TestServlet担任具体模板角色
+
+　　　　TestServlet置换掉了父类HttpServlet中七个基本方法中的其中两个，分别是doGet()和doPost()。

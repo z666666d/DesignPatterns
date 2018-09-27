@@ -1,0 +1,55 @@
+纯的与不纯的责任链模式
+一个纯的责任链模式要求一个具体的处理者对象只能在两个行为中选择一个：一是承担责任，二是把责任推给下家。
+不允许出现某一个具体处理者对象在承担了一部分责任后又 把责任向下传的情况。
+
+在一个纯的责任链模式里面，一个请求必须被某一个处理者对象所接收；
+在一个不纯的责任链模式里面，一个请求可以最终不被任何接收端对象所接收。
+
+纯的责任链模式的实际例子很难找到，一般看到的例子均是不纯的责任链模式的实现。
+有些人认为不纯的责任链根本不是责任链模式，这也许是有道理的。
+但是在实际的系统里，纯的责任链很难找到。如果坚持责任链不纯便不是责任链模式，那么责任链模式便不会有太大意义了。
+
+
+责任链模式在Tomcat中的应用
+众所周知Tomcat中的Filter就是使用了责任链模式，创建一个Filter除了要在web.xml文件中做相应配置外，还需要实现javax.servlet.Filter接口。
+
+一个例子：
+public class TestFilter implements Filter{
+
+    public void doFilter(ServletRequest request, ServletResponse response,
+            FilterChain chain) throws IOException, ServletException {
+        
+        chain.doFilter(request, response);
+    }
+
+    public void destroy() {
+    }
+
+    public void init(FilterConfig filterConfig) throws ServletException {
+    }
+
+}
+
+其实在真正执行到TestFilter类之前，会经过很多Tomcat内部的类。
+所有的Filter是被保存在ApplicationFilterChain类中的一个ApplicationFilterConfig对象的数组中。
+
+	/**
+     * Filters.
+     */
+    private ApplicationFilterConfig[] filters = new ApplicationFilterConfig[0];
+    
+ApplicationFilterConfig是一个Filter容器。以下是ApplicationFilterConfig类的声明：
+
+/**
+ * Implementation of a <code>javax.servlet.FilterConfig</code> useful in
+ * managing the filter instances instantiated when a web application
+ * is first started.
+ *
+ * @author Craig R. McClanahan
+ * @version $Id: ApplicationFilterConfig.java 1201569 2011-11-14 01:36:07Z kkolinko $
+ */
+ 
+ 当一个web应用首次启动时ApplicationFilterConfig会自动实例化，
+ 它会从该web应用的web.xml文件中读取配置的Filter的信息，然后装进该容器。
+
+
